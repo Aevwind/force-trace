@@ -33,9 +33,12 @@ class VbtSessionEngine {
            ),
        stateMachine = RepStateMachine(minRomCm: profile.minRomCm),
        startedAt = DateTime.now() {
-    _barFilter = PointFilter(beta: 2.2, minCutoff: 2.2);
+    // Filter normalized coordinates: pixel-sized derivatives made the adaptive
+    // cutoff so large that even stationary landmark jitter passed through.
+    _barFilter = PointFilter(beta: 8, minCutoff: 1.8);
     for (final id in LandmarkId.values) {
-      _landmarkFilters[id] = PointFilter(beta: 1.2, minCutoff: 1.8);
+      _landmarkFilters[id] = PointFilter(beta: 5, minCutoff: 1.2);
+      _secondaryFilters[id] = PointFilter(beta: 5, minCutoff: 1.2);
     }
   }
 
@@ -53,6 +56,9 @@ class VbtSessionEngine {
 
   late final PointFilter _barFilter;
   final Map<LandmarkId, PointFilter> _landmarkFilters = {};
+  final Map<LandmarkId, PointFilter> _secondaryFilters = {};
+  Size? _trackingImageSize;
+  int? _trackingId;
 
   final List<RepResult> reps = [];
   final List<VbtEvent> _events = [];
@@ -92,6 +98,28 @@ class VbtSessionEngine {
     return events;
   }
 
+  /// Discard an interrupted repetition and temporal state before reacquisition.
+  /// Completed reps and their statistics remain part of the current set.
+  void resetTracking() {
+    _previousBarPixels = null;
+    _previousTimestampMs = null;
+    _trackingImageSize = null;
+    _trackingId = null;
+    _speed = 0;
+    _rawSpeed = 0;
+    _verticalVelocity = 0;
+    _barFilter.reset();
+    for (final filter in [
+      ..._landmarkFilters.values,
+      ..._secondaryFilters.values,
+    ]) {
+      filter.reset();
+    }
+    _fps.reset();
+    stateMachine.abort();
+    _trajectory.clear();
+  }
+
   void advance(double dtSeconds) {
     final dt = dtSeconds.clamp(0.001, 0.08);
     _sessionSeconds += dt;
@@ -99,8 +127,8 @@ class VbtSessionEngine {
     if (!frame.hasPose) {
       // Keep the last metrics visible, but do not let empty landmarks complete
       // a rep or produce a fake velocity spike while the detector warms up.
-      _previousBarPixels = null;
-      _previousTimestampMs = null;
+      resetTracking();
+      _fpsValue = 0;
       final neutral = LiveFrame(
         landmarks: const {},
         bar: const Offset(0.5, 0.5),
@@ -124,30 +152,61 @@ class VbtSessionEngine {
       return;
     }
     final timestampMs = frame.timestampMs;
+    if (_trackingId != null && _trackingId != frame.trackingId) {
+      resetTracking();
+    }
+    final previousTimestamp = _previousTimestampMs;
+    // The camera source is sampled by a faster HUD timer. A cached result is
+    // not a new measurement and must not advance filters, velocity or rep state.
+    if (previousTimestamp != null && timestampMs <= previousTimestamp) return;
+    if ((_trackingImageSize != null && _trackingImageSize != frame.imageSize) ||
+        (previousTimestamp != null && timestampMs - previousTimestamp > 500)) {
+      resetTracking();
+    }
     final dtSecondsEffective = _previousTimestampMs == null
         ? dt
-        : ((timestampMs - _previousTimestampMs!) / 1000).clamp(0.008, 0.08);
-    _fpsValue = _fps.add(dtSecondsEffective);
+        : (timestampMs - _previousTimestampMs!) / 1000;
+    if (_previousTimestampMs != null) {
+      _fpsValue = _fps.add(dtSecondsEffective);
+    } else if (frame.isCameraFrame) {
+      _fpsValue = 0;
+    }
+    _trackingImageSize = frame.imageSize;
+    _trackingId = frame.trackingId;
 
     final width = frame.imageSize.width;
     final height = frame.imageSize.height;
     final tSeconds = timestampMs / 1000;
 
-    final rawBarPixels = Offset(
-      frame.trackedPoint.dx * width,
-      frame.trackedPoint.dy * height,
+    final barPixels = Offset(
+      _barFilter.x.filter(frame.trackedPoint.dx, tSeconds) * width,
+      _barFilter.y.filter(frame.trackedPoint.dy, tSeconds) * height,
     );
-    final filteredBarX = _barFilter.x.filter(rawBarPixels.dx, tSeconds);
-    final filteredBarY = _barFilter.y.filter(rawBarPixels.dy, tSeconds);
-    final barPixels = Offset(filteredBarX, filteredBarY);
 
-    final landmarks = <LandmarkId, Offset>{};
-    for (final entry in frame.landmarks.entries) {
-      final filter = _landmarkFilters[entry.key]!;
-      final x = filter.x.filter(entry.value.dx * width, tSeconds);
-      final y = filter.y.filter(entry.value.dy * height, tSeconds);
-      landmarks[entry.key] = Offset(x, y);
+    Map<LandmarkId, Offset> filterLandmarks(
+      Map<LandmarkId, Offset> points,
+      Map<LandmarkId, PointFilter> filters,
+    ) {
+      final result = <LandmarkId, Offset>{};
+      for (final entry in filters.entries) {
+        final point = points[entry.key];
+        if (point == null) {
+          entry.value.reset();
+          continue;
+        }
+        result[entry.key] = Offset(
+          entry.value.x.filter(point.dx, tSeconds) * width,
+          entry.value.y.filter(point.dy, tSeconds) * height,
+        );
+      }
+      return result;
     }
+
+    final landmarks = filterLandmarks(frame.landmarks, _landmarkFilters);
+    final secondary = filterLandmarks(
+      frame.secondaryLandmarks,
+      _secondaryFilters,
+    );
 
     if (_previousBarPixels != null) {
       final dx = barPixels.dx - _previousBarPixels!.dx;
@@ -156,7 +215,8 @@ class VbtSessionEngine {
       _rawSpeed = meters / dtSecondsEffective;
       // A light exponential smoother removes single-frame noise spikes from the
       // peak-velocity value without adding noticeable lag to the mean.
-      _speed = _speed <= 0 ? _rawSpeed : _speed * 0.55 + _rawSpeed * 0.45;
+      final alpha = 1 - math.exp(-dtSecondsEffective / 0.055);
+      _speed += (_rawSpeed - _speed) * alpha;
       _verticalVelocity = -dy * calibration.metersPerPixel / dtSecondsEffective;
     }
     _previousBarPixels = barPixels;
@@ -254,7 +314,10 @@ class VbtSessionEngine {
       hasPose: frame.hasPose,
       imageSize: frame.imageSize,
       cameraFrame: frame.isCameraFrame,
-      secondaryLandmarks: frame.secondaryLandmarks,
+      secondaryLandmarks: {
+        for (final entry in secondary.entries)
+          entry.key: Offset(entry.value.dx / width, entry.value.dy / height),
+      },
     );
     _lastFrame = frameOut;
     _lastStats = _buildStats(frameOut);

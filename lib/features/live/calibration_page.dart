@@ -42,6 +42,7 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
   Timer? _sensorTimer;
   Timer? _visionTimer;
   VisionPoseSource? _visionSource;
+  Future<void> _visionChange = Future<void>.value();
   double _bodyPixelHeight = 0;
   double _visionConfidence = 0;
   bool _visionError = false;
@@ -78,7 +79,6 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
         setState(() => _tiltSensorAlive = false);
       }
     });
-    unawaited(_startVision());
   }
 
   Future<void> _startVision() async {
@@ -93,14 +93,15 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
         controller: camera,
         pattern: MotionPattern.squat,
         userHeightCm: _heightCm,
+        framesPerSecond: 6,
       );
       await source.start();
-      if (!mounted) {
+      if (!mounted || _method != CalibrationMethod.height) {
         await source.stop();
         return;
       }
       setState(() => _visionSource = source);
-      _visionTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      _visionTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
         if (!mounted) return;
         final body = source.bodyPixelHeight;
         final confidence = source.confidence;
@@ -126,6 +127,21 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
     final source = _visionSource;
     _visionSource = null;
     await source?.stop();
+  }
+
+  Future<void> _changeMethod(CalibrationMethod method) async {
+    if (_method == method) return;
+    setState(() {
+      _method = method;
+      _bodyPixelHeight = 0;
+      _visionConfidence = 0;
+      _visionError = false;
+    });
+    _visionChange = _visionChange.then((_) async {
+      await _stopVision();
+      if (mounted && _method == CalibrationMethod.height) await _startVision();
+    });
+    await _visionChange;
   }
 
   @override
@@ -195,6 +211,7 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
       confidence: 0.6,
     );
     if (calibration == null) return;
+    await _visionChange;
     await _stopVision();
     if (!mounted) return;
     Navigator.of(context).pop(calibration);
@@ -214,6 +231,7 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
       );
       return;
     }
+    await _visionChange;
     await _stopVision();
     if (!mounted) return;
     Navigator.of(context).pop(calibration);
@@ -338,7 +356,7 @@ class _CalibrationPageState extends ConsumerState<CalibrationPage>
                 const Spacer(flex: 2),
                 _CalibrationPanel(
                   method: _method,
-                  onMethodChanged: (value) => setState(() => _method = value),
+                  onMethodChanged: _changeMethod,
                   plateDiameterCm: _plateDiameterCm,
                   onPlateDiameterChanged: (value) =>
                       setState(() => _plateDiameterCm = value),
@@ -389,7 +407,9 @@ class _LiveCalibrationStatus extends StatelessWidget {
     late final Color color;
     if (!cameraLive) {
       color = AppColors.orange;
-      text = zh ? '相机未开启：片径自动识别仍是演示；身高标定需要先开启相机' : 'Camera off: plate detection is still a demo; enable the camera for real height calibration';
+      text = zh
+          ? '相机未开启：片径自动识别仍是演示；身高标定需要先开启相机'
+          : 'Camera off: plate detection is still a demo; enable the camera for real height calibration';
     } else if (error) {
       color = AppColors.orange;
       text = zh
@@ -403,11 +423,15 @@ class _LiveCalibrationStatus extends StatelessWidget {
             : 'Real height calibration · nose-ankle ${bodyPixelHeight.round()} px · ${(confidence * 100).round()}% confidence';
       } else {
         color = AppColors.orange;
-        text = zh ? '请后退至全身入镜（头、肩、髋、膝、踝）' : 'Step back until your head, shoulders, hips, knees and ankles are visible';
+        text = zh
+            ? '请后退至全身入镜（头、肩、髋、膝、踝）'
+            : 'Step back until your head, shoulders, hips, knees and ankles are visible';
       }
     } else {
       color = AppColors.orange;
-      text = zh ? '自动片径仍为演示；切换「身高标定」可使用真实比例尺' : 'Automatic plate detection is a demo; use Height calibration for a real scale';
+      text = zh
+          ? '自动片径仍为演示；切换「身高标定」可使用真实比例尺'
+          : 'Automatic plate detection is a demo; use Height calibration for a real scale';
     }
 
     return Container(

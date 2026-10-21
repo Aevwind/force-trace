@@ -57,6 +57,7 @@ class PoseFrame {
     this.pattern = MotionPattern.squat,
     this.hasPose = true,
     this.isCameraFrame = false,
+    this.trackingId = 0,
     this.secondaryLandmarks = const {},
   });
 
@@ -79,6 +80,10 @@ class PoseFrame {
   /// True when [landmarks] come from the real camera and must be mapped with
   /// the camera preview's BoxFit.cover transform instead of the HUD stage.
   final bool isCameraFrame;
+
+  /// Changes when a source reacquires a pose or selects a new anatomical side.
+  /// Consumers must not carry temporal filters across tracking runs.
+  final int trackingId;
 }
 
 class TrajectoryPoint {

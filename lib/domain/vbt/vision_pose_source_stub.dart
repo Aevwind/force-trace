@@ -11,6 +11,7 @@ class VisionPoseSource implements PoseFrameSource {
     required CameraController controller,
     required this.pattern,
     this.userHeightCm = 175,
+    int framesPerSecond = 15,
   });
 
   static bool get isSupported => false;
@@ -25,6 +26,7 @@ class VisionPoseSource implements PoseFrameSource {
 
   Future<void> start() async {}
   Future<void> stop() async {}
+  void setPaused(bool paused) {}
 
   @override
   double get totalSeconds => 0;

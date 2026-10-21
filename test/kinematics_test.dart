@@ -78,6 +78,14 @@ void main() {
       expect(filter.value, 0);
       expect(filter.filter(0.3, 0), 0.3);
     });
+
+    test('repeated or older timestamps leave the filter history untouched', () {
+      final filter = OneEuroFilter();
+      final value = filter.filter(0.4, 1);
+      expect(filter.filter(0.9, 1), value);
+      expect(filter.filter(0.9, 0.5), value);
+      expect(filter.filter(0.4, 1.1), closeTo(0.4, 1e-9));
+    });
   });
 
   group('FpsCounter', () {

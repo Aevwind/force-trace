@@ -4,66 +4,115 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 import 'pose_models.dart';
+import 'vision_frame_throttle.dart';
+import 'vision_pose_mapper.dart';
 
 /// Real on-device pose inference using Google ML Kit.
 ///
-/// ML Kit runs natively (platform channels) and returns 33 normalized body
-/// landmarks. This adapter feeds the existing VBT engine with a body/barbell
+/// ML Kit runs natively (platform channels) and returns 33 body landmarks.
+/// This adapter normalizes them and feeds the VBT engine with a body/barbell
 /// reference point derived from the wrists (pressing/hinging), shoulders
 /// (squat) or hips (bodyweight movements). It intentionally runs alongside the
 /// camera preview and only keeps the latest result; the 30 Hz engine samples it.
-class VisionPoseSource implements PoseFrameSource {
+class VisionPoseSource with WidgetsBindingObserver implements PoseFrameSource {
   VisionPoseSource({
     required this.controller,
     required this.pattern,
     this.userHeightCm = 175,
-  });
+    int framesPerSecond = 15,
+  }) : _throttle = VisionFrameThrottle(framesPerSecond: framesPerSecond),
+       _mapper = VisionPoseMapper(pattern: pattern);
 
   static bool get isSupported => true;
 
   final CameraController controller;
   final MotionPattern pattern;
   final double userHeightCm;
+  final VisionFrameThrottle _throttle;
+  final VisionPoseMapper _mapper;
+  final Stopwatch _clock = Stopwatch();
+  static const _staleAfterMs = 500;
 
   PoseDetector? _detector;
   bool _running = false;
-  bool _processing = false;
-  int _misses = 0;
+  bool _paused = false;
+  bool _appActive = true;
+  int _trackingGeneration = 0;
+  Future<void>? _inFlight;
   VisionFrame? _latest;
   String? _error;
 
-  bool get hasPose => _latest?.frame.hasPose ?? false;
-  double get confidence => _latest?.confidence ?? 0;
+  VisionFrame? get _current {
+    final latest = _latest;
+    if (latest == null ||
+        _clock.elapsedMicroseconds / 1000 - latest.frame.timestampMs >
+            _staleAfterMs) {
+      return null;
+    }
+    return latest;
+  }
+
+  bool get hasPose => _current != null;
+  double get confidence => _current?.confidence ?? 0;
 
   /// Nose-to-ankle pixel height in the current rotated image, used for a real
   /// height-based calibration when the full body is visible.
-  double get bodyPixelHeight => _latest?.bodyPixelHeight ?? 0;
+  double get bodyPixelHeight => _current?.bodyPixelHeight ?? 0;
   String? get lastError => _error;
 
   @override
   double get totalSeconds => 3600;
 
+  /// Keep the preview available during a rest without running the pose model.
+  void setPaused(bool paused) {
+    _paused = paused;
+    if (paused) _clearTracking();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appActive = state == AppLifecycleState.resumed;
+    if (!_appActive) _clearTracking();
+  }
+
+  void _clearTracking() {
+    _trackingGeneration++;
+    _latest = null;
+    _mapper.reset();
+    _throttle.reset();
+  }
+
   Future<void> start() async {
     if (_running) return;
     _error = null;
+    _clearTracking();
+    _clock.start();
+    final binding = WidgetsBinding.instance;
+    _appActive =
+        binding.lifecycleState == null ||
+        binding.lifecycleState == AppLifecycleState.resumed;
+    binding.addObserver(this);
     _detector = PoseDetector(
       options: PoseDetectorOptions(
         mode: PoseDetectionMode.stream,
         model: PoseDetectionModel.base,
       ),
     );
+    _running = true;
     try {
       await controller.startImageStream(_onImage);
-      _running = true;
       debugPrint(
         '[vision] stream started ${controller.description.lensDirection} '
         '${controller.value.deviceOrientation} '
         '${controller.description.sensorOrientation}°',
       );
     } catch (error) {
+      _running = false;
+      binding.removeObserver(this);
       _error = '$error';
       debugPrint('[vision] stream start failed: $error');
       await _detector?.close();
@@ -75,13 +124,15 @@ class VisionPoseSource implements PoseFrameSource {
   Future<void> stop() async {
     if (!_running && _detector == null) return;
     _running = false;
-    _latest = null;
-    _misses = 0;
+    WidgetsBinding.instance.removeObserver(this);
+    _clearTracking();
     try {
       await controller.stopImageStream();
     } catch (_) {
       // The controller can already be disposed when a route pops.
     }
+    // Never close a native detector while processImage is still using it.
+    await _inFlight;
     try {
       await _detector?.close();
     } catch (_) {
@@ -91,30 +142,53 @@ class VisionPoseSource implements PoseFrameSource {
   }
 
   void _onImage(CameraImage image) {
-    if (!_running || _processing) return;
-    _processing = true;
-    unawaited(
-      _process(image).whenComplete(() {
-        _processing = false;
-      }),
-    );
+    if (!_running || _paused || !_appActive || _inFlight != null) return;
+    final now = _clock.elapsed;
+    if (!_throttle.accept(now)) return;
+    final operation = _process(image, now.inMicroseconds / 1000);
+    _inFlight = operation;
+    unawaited(operation.whenComplete(() => _inFlight = null));
   }
 
-  Future<void> _process(CameraImage image) async {
+  Future<void> _process(CameraImage image, double timestampMs) async {
     final detector = _detector;
     if (detector == null) return;
-    final input = _inputImage(image);
-    if (input == null) return;
+    final generation = _trackingGeneration;
     try {
+      final input = _inputImage(image);
+      if (input == null) return;
       final poses = await detector.processImage(input);
-      if (poses.isEmpty) {
-        _misses++;
-        if (_misses >= 12) _latest = null;
+      if (!_running ||
+          _paused ||
+          !_appActive ||
+          generation != _trackingGeneration ||
+          detector != _detector) {
         return;
       }
-      _misses = 0;
-      _latest = _mapPose(poses.first, input);
+      if (poses.isEmpty) return;
+      if (_current == null) _mapper.reset();
+      final metadata = input.metadata!;
+      final rotation = metadata.rotation.rawValue;
+      final rotated = rotation == 90 || rotation == 270;
+      final result = _mapper.map(
+        poses.first,
+        imageSize: rotated
+            ? Size(metadata.size.height, metadata.size.width)
+            : metadata.size,
+        mirror:
+            controller.description.lensDirection == CameraLensDirection.front,
+        timestampMs: timestampMs,
+      );
+      // Brief occlusions hold the last good pose for a time-based grace period,
+      // independent of the detector's frame rate. It expires even on errors.
+      if (result.frame.hasPose) _latest = result;
+      _error = null;
     } catch (error) {
+      if (!_running ||
+          generation != _trackingGeneration ||
+          detector != _detector) {
+        return;
+      }
       _error = '$error';
       debugPrint('[vision] process failed: $error');
     }
@@ -208,221 +282,17 @@ class VisionPoseSource implements PoseFrameSource {
     return InputImageRotationValue.fromRawValue(degrees);
   }
 
-  VisionFrame _mapPose(Pose pose, InputImage input) {
-    final metadata = input.metadata!;
-    final rotation = metadata.rotation.rawValue;
-    final rotated = rotation == 90 || rotation == 270;
-    final imageSize = rotated
-        ? Size(metadata.size.height, metadata.size.width)
-        : metadata.size;
-    // CameraPreview mirrors the front lens; mirror the normalized landmarks so
-    // the skeleton stays aligned with what the user sees.
-    final mirror =
-        controller.description.lensDirection == CameraLensDirection.front;
-
-    Offset? point(PoseLandmarkType type, {double minLikelihood = 0.25}) {
-      final landmark = pose.landmarks[type];
-      if (landmark == null || landmark.likelihood < minLikelihood) return null;
-      // google_mlkit_pose_detection returns landmark positions in image pixels
-      // for some ML Kit versions; older docs describe them as normalized. Handle
-      // both representations without shrinking an already-normalized point.
-      var x = landmark.x;
-      var y = landmark.y;
-      if (x > 1.0 || y > 1.0) {
-        x /= imageSize.width;
-        y /= imageSize.height;
-      }
-      x = x.clamp(0.0, 1.0);
-      y = y.clamp(0.0, 1.0);
-      return Offset(mirror ? 1 - x : x, y);
-    }
-
-    double score(List<PoseLandmarkType> types) {
-      var sum = 0.0;
-      var count = 0;
-      for (final type in types) {
-        final landmark = pose.landmarks[type];
-        if (landmark == null) continue;
-        sum += landmark.likelihood;
-        count++;
-      }
-      return count == 0 ? 0 : sum / count;
-    }
-
-    final leftScore = score(const [
-      PoseLandmarkType.leftShoulder,
-      PoseLandmarkType.leftHip,
-      PoseLandmarkType.leftKnee,
-      PoseLandmarkType.leftAnkle,
-    ]);
-    final rightScore = score(const [
-      PoseLandmarkType.rightShoulder,
-      PoseLandmarkType.rightHip,
-      PoseLandmarkType.rightKnee,
-      PoseLandmarkType.rightAnkle,
-    ]);
-    final useLeft = leftScore >= rightScore;
-
-    Offset? midpoint(PoseLandmarkType left, PoseLandmarkType right) {
-      final a = point(left);
-      final b = point(right);
-      if (a == null) return b;
-      if (b == null) return a;
-      return Offset((a.dx + b.dx) / 2, (a.dy + b.dy) / 2);
-    }
-
-    final head =
-        point(PoseLandmarkType.nose) ??
-        midpoint(PoseLandmarkType.leftEar, PoseLandmarkType.rightEar);
-
-    Map<LandmarkId, Offset> sideMap(bool left) {
-      final map = <LandmarkId, Offset>{};
-      void put(LandmarkId id, Offset? value) {
-        if (value != null) map[id] = value;
-      }
-
-      put(LandmarkId.head, head);
-      put(
-        LandmarkId.shoulder,
-        point(
-          left ? PoseLandmarkType.leftShoulder : PoseLandmarkType.rightShoulder,
-        ),
-      );
-      put(
-        LandmarkId.elbow,
-        point(left ? PoseLandmarkType.leftElbow : PoseLandmarkType.rightElbow),
-      );
-      put(
-        LandmarkId.wrist,
-        point(left ? PoseLandmarkType.leftWrist : PoseLandmarkType.rightWrist),
-      );
-      put(
-        LandmarkId.hip,
-        point(left ? PoseLandmarkType.leftHip : PoseLandmarkType.rightHip),
-      );
-      put(
-        LandmarkId.knee,
-        point(left ? PoseLandmarkType.leftKnee : PoseLandmarkType.rightKnee),
-      );
-      put(
-        LandmarkId.ankle,
-        point(left ? PoseLandmarkType.leftAnkle : PoseLandmarkType.rightAnkle),
-      );
-      put(
-        LandmarkId.toe,
-        point(
-              left
-                  ? PoseLandmarkType.leftFootIndex
-                  : PoseLandmarkType.rightFootIndex,
-            ) ??
-            map[LandmarkId.ankle],
-      );
-      return map;
-    }
-
-    final primary = sideMap(useLeft);
-    final secondary = sideMap(!useLeft);
-    // Fill a missing primary joint from the other side for the full-body
-    // validity check, while keeping the opposite side for the second skeleton.
-    for (final entry in secondary.entries) {
-      primary.putIfAbsent(entry.key, () => entry.value);
-    }
-
-    final shoulder = primary[LandmarkId.shoulder];
-    final hip = primary[LandmarkId.hip];
-    final knee = primary[LandmarkId.knee];
-    final ankle = primary[LandmarkId.ankle];
-
-    // The reference point that best approximates the moving barbell/body:
-    // - squat: bar rests on the upper back -> shoulder midpoint
-    // - bench/press/hinge/curl: hands hold the bar -> wrist midpoint
-    // - pull-up/push-up: body reference (hips/shoulders)
-    final bar = switch (pattern) {
-      MotionPattern.squat => midpoint(
-        PoseLandmarkType.leftShoulder,
-        PoseLandmarkType.rightShoulder,
-      ),
-      MotionPattern.bench ||
-      MotionPattern.press ||
-      MotionPattern.hinge ||
-      MotionPattern.curl => midpoint(
-        PoseLandmarkType.leftWrist,
-        PoseLandmarkType.rightWrist,
-      ),
-      MotionPattern.pullup => midpoint(
-        PoseLandmarkType.leftHip,
-        PoseLandmarkType.rightHip,
-      ),
-      MotionPattern.pushup => midpoint(
-        PoseLandmarkType.leftShoulder,
-        PoseLandmarkType.rightShoulder,
-      ),
-    };
-
-    if (shoulder == null ||
-        hip == null ||
-        knee == null ||
-        ankle == null ||
-        ((leftScore + rightScore) / 2) < 0.4) {
-      return VisionFrame(
-        frame: PoseFrame(
-          timestampMs: DateTime.now().millisecondsSinceEpoch.toDouble(),
-          imageSize: imageSize,
-          landmarks: primary,
-          secondaryLandmarks: secondary,
-          trackedPoint: const Offset(0.5, 0.5),
-          pattern: pattern,
-          hasPose: false,
-          isCameraFrame: true,
-        ),
-        confidence: 0,
-        bodyPixelHeight: 0,
-      );
-    }
-
-    final confidence = (leftScore + rightScore) / 2;
-    final body = head != null
-        ? (ankle.dy - head.dy).abs() * imageSize.height
-        : 0.0;
-    final tracked = bar ?? shoulder;
-    return VisionFrame(
-      frame: PoseFrame(
-        timestampMs: DateTime.now().millisecondsSinceEpoch.toDouble(),
-        imageSize: imageSize,
-        landmarks: primary,
-        secondaryLandmarks: secondary,
-        trackedPoint: tracked,
-        pattern: pattern,
-        hasPose: true,
-        isCameraFrame: true,
-      ),
-      confidence: confidence,
-      bodyPixelHeight: body,
-    );
-  }
-
   @override
   PoseFrame frameAt(double seconds) {
-    return _latest?.frame ??
+    return _current?.frame ??
         PoseFrame(
-          timestampMs: seconds * 1000,
-          imageSize: const Size(1, 1),
+          timestampMs: _clock.elapsedMicroseconds / 1000,
+          imageSize: _latest?.frame.imageSize ?? const Size(1, 1),
           landmarks: const {},
           trackedPoint: const Offset(0.5, 0.5),
           pattern: pattern,
           hasPose: false,
+          isCameraFrame: true,
         );
   }
-}
-
-class VisionFrame {
-  const VisionFrame({
-    required this.frame,
-    required this.confidence,
-    required this.bodyPixelHeight,
-  });
-
-  final PoseFrame frame;
-  final double confidence;
-  final double bodyPixelHeight;
 }

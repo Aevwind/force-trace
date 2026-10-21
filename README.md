@@ -155,7 +155,7 @@ lib/
 assets/db/           initial_exercises.db.gz（预置 SQLite，10 语言，1324 动作）
 tool/                  build_exercises_dataset.py, make_icons.py
 web/                   index.html, manifest, sqlite3.wasm, drift_worker.js
-test/                  27 个单元/组件测试
+test/                  41 个单元/组件测试
 ```
 
 ### 关键算法
@@ -187,13 +187,15 @@ python tool/build_exercises_dataset.py --source /path/to/exercises.json
 
 实时链路已经接入 **Android/iOS 的 ML Kit Pose Landmarker**（`google_mlkit_pose_detection 0.16.1`）：
 
-- `camera.startImageStream` → NV21/YUV420 转换 → ML Kit 33 个关键点 → 选择置信度更高的一侧 → `PoseFrame`；
-- 参考点：深蹲取肩中点；卧推/推举/硬拉/弯举取手腕中点；引体取髋中点；俯卧撑取肩中点；
+- 相机请求 **15 FPS**；`camera.startImageStream` → **最多 15 FPS 的推理节流** → NV21/YUV420 转换 → ML Kit 33 个关键点 → `PoseFrame`。多余帧在转换和推理前丢弃，无积压队列；实际采集帧率取决于设备支持；
+- 首次识别选择可见且置信度较高的一侧，并在本次跟踪期间固定左右身份与参考点，避免逐帧切侧或遮挡时从双侧中点跳到单侧。参考点：深蹲/俯卧撑取该侧肩；卧推/推举/硬拉/弯举取该侧手腕；引体取该侧髋；
+- 双侧骨架与参考点均在归一化坐标上做 One-Euro 滤波，避免像素尺度放大导数后使滤波失效；HUD 的 30 Hz 轮询只处理新时间戳，速度按真实采样间隔计算，支持低帧率；
+- 暂停、后台和结束训练时不再调用姿态模型；身高标定最多 **6 FPS**，片径演示标定不运行姿态模型。短暂遮挡保留最近的有效姿态，**500 ms** 后失效，重新识别时重置滤波和未完成动作，避免速度突跳；
 - 相机模式使用 100% 相机预览；HUD 只保留顶部/底部渐变压暗，不再叠加大面积黑色蒙层；
 - 真实姿态的骨骼、轨迹与速度胶囊按相机 `BoxFit.cover` 变换和 ML Kit 图像尺寸映射到屏幕，避免骨架缩在合成正方形舞台内导致错位；前置全景会同时绘制左右两侧骨架，不再只画单侧；
 - **关键修正**：`google_mlkit_pose_detection` 在 Android 上返回的是**图像像素坐标**而非 0~1 归一化坐标；适配器先按旋转后的图像尺寸（如 480×720）归一化，再做前置镜像。此前直接 clamp 到 0~1 会让所有关节塌缩到 `(0,1)`，表现为骨架消失或严重错位；
 - 身高标定在标定页直接启动相机 + ML Kit：全身入镜后读取鼻-踝像素高度生成真实比例尺，未检测到完整身体时不允许真实身高确认；此时可点「使用默认标定」用 45 cm 默认比例尺继续，避免卡在标定页。标定同时支持**水平放置**与**竖放（portrait）**，真机竖放读数已验证。
-- HUD 显示 `ML KIT` / `30 FPS`；相机未开启、Web、或 ML Kit 不可用时回退到确定性的 `SimulatedPoseSource`，界面显示「演示追踪」。
+- HUD 显示 `ML KIT` / `≤15 FPS`；相机未开启、Web、或 ML Kit 不可用时回退到确定性的 `SimulatedPoseSource`，界面显示「演示追踪」。
 
 仍然存在的边界：
 
@@ -211,13 +213,14 @@ python tool/build_exercises_dataset.py --source /path/to/exercises.json
 
 ```bash
 flutter analyze          # No issues found
-flutter test             # 27 tests passed
+flutter test             # 41 tests passed
 flutter build web --release --no-wasm-dry-run
 ```
 
 测试覆盖：
 
 - One-Euro 收敛、抖动抑制、阶跃响应、重置；
+- 15 FPS 节流、双侧骨架与参考点稳定性、旧帧去重、10/15 FPS 计次与速度、跟踪批次重置、暂停/后台停推理、过期姿态与退出时的迟到结果；
 - 关节角、角度格式化、FPS 统计；
 - 肌群映射：胸/背/腿/臂/臀/核心到 `flutter_body_atlas` 稳定肌肉 ID 的转换；
 - 四态状态机：完整深蹲、幅度不足、只有向心、连续两次；

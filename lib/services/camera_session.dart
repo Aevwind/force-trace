@@ -57,6 +57,7 @@ class CameraSession extends ChangeNotifier {
       final controller = CameraController(
         camera,
         ResolutionPreset.medium,
+        fps: 15,
         enableAudio: false,
         imageFormatGroup: defaultTargetPlatform == TargetPlatform.android
             ? ImageFormatGroup.nv21

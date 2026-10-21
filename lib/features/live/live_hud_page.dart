@@ -44,7 +44,8 @@ class LiveHudPage extends ConsumerStatefulWidget {
   ConsumerState<LiveHudPage> createState() => _LiveHudPageState();
 }
 
-class _LiveHudPageState extends ConsumerState<LiveHudPage> {
+class _LiveHudPageState extends ConsumerState<LiveHudPage>
+    with WidgetsBindingObserver {
   final ValueNotifier<LiveFrame?> _emptyFrame = ValueNotifier(null);
   late final ExerciseProfile _profile;
   late final CameraSession _camera;
@@ -55,6 +56,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   VisionPoseSource? _visionSource;
   late double _weight;
   bool _saving = false;
+  bool _starting = false;
   bool _finishing = false;
   bool _autoStopHandled = false;
   bool _allowPop = false;
@@ -62,6 +64,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _profile = ExerciseProfile.forExercise(widget.exercise);
     _camera = CameraSession();
     _weight = widget.initialWeightKg;
@@ -73,6 +76,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     final vision = _visionSource;
     _visionSource = null;
     unawaited(vision?.stop());
@@ -83,6 +87,11 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   }
 
   bool get _started => _controller != null;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed && _started) _pause();
+  }
 
   Future<void> _openCalibration() async {
     final result = await pushAppPage<Calibration>(
@@ -118,6 +127,16 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   }
 
   Future<void> _start() async {
+    if (_starting) return;
+    _starting = true;
+    try {
+      await _startSession();
+    } finally {
+      _starting = false;
+    }
+  }
+
+  Future<void> _startSession() async {
     if (_started) {
       _resume();
       return;
@@ -140,9 +159,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
             userHeightCm: settings.userHeightCm,
           );
           await vision.start();
-          // Wait briefly for the first real landmark set. This lets a
-          // height-calibrated session replace the demo 675 px assumption with
-          // the actual nose-to-ankle pixel height from the camera.
+          // Give the detector a short warm-up before publishing the HUD.
           for (var i = 0; i < 24 && !vision.hasPose; i++) {
             await Future<void>.delayed(const Duration(milliseconds: 50));
           }
@@ -174,6 +191,10 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
         }
       }
     }
+    if (!mounted) {
+      await vision?.stop();
+      return;
+    }
     _visionSource = vision;
 
     final engine = VbtSessionEngine(
@@ -193,15 +214,22 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
       onAutoStop: _handleAutoStop,
     );
     setState(() => _controller = controller);
-    controller.start();
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == null || lifecycle == AppLifecycleState.resumed) {
+      controller.start();
+    } else {
+      vision?.setPaused(true);
+    }
   }
 
   void _pause() {
+    _visionSource?.setPaused(true);
     _controller?.pause();
     setState(() {});
   }
 
   void _resume() {
+    _visionSource?.setPaused(false);
     _controller?.resume();
     setState(() {});
   }
@@ -209,7 +237,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   void _handleAutoStop() {
     if (!mounted || _autoStopHandled) return;
     _autoStopHandled = true;
-    _controller?.pause();
+    _pause();
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -239,6 +267,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
     if (controller == null || _finishing) return;
     _finishing = true;
     final result = controller.stop();
+    _visionSource?.setPaused(true);
 
     if (result.reps.isEmpty) {
       final discard = await showDialog<bool>(
@@ -352,6 +381,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
     final vision = _visionSource;
     _visionSource = null;
     await vision?.stop();
+    if (!mounted) return;
     _controller?.dispose();
     _controller = null;
     _autoStopHandled = false;
@@ -361,7 +391,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   }
 
   Future<void> _flipCamera() async {
-    if (_controller != null || _visionSource != null) {
+    if (_starting || _controller != null || _visionSource != null) {
       showAppSnack(
         context,
         context.isZh
@@ -378,7 +408,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage> {
   }
 
   Future<void> _toggleCamera() async {
-    if (_controller != null || _visionSource != null) {
+    if (_starting || _controller != null || _visionSource != null) {
       showAppSnack(
         context,
         context.isZh
@@ -862,7 +892,7 @@ class _TopBar extends StatelessWidget {
                         const SizedBox(width: 6),
                         Flexible(
                           child: Text(
-                            vision ? '30 FPS' : 'AI VISION · 30 FPS',
+                            vision ? 'ML KIT · ≤15 FPS' : 'AI VISION · 30 FPS',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

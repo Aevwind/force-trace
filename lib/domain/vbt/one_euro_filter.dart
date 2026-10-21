@@ -27,6 +27,7 @@ class OneEuroFilter {
 
   double filter(double x, double timestampSeconds) {
     final lastTime = _lastTime;
+    if (lastTime != null && timestampSeconds <= lastTime) return value;
     if (lastTime != null) {
       final dt = timestampSeconds - lastTime;
       if (dt > 1e-6) {
@@ -98,6 +99,8 @@ class FpsCounter {
 
   final int window;
   final List<double> _deltas = [];
+
+  void reset() => _deltas.clear();
 
   double add(double dtSeconds) {
     if (dtSeconds <= 0) return 30;

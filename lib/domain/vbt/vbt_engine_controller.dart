@@ -45,6 +45,7 @@ class VbtEngineController {
     _running = false;
     _timer?.cancel();
     _timer = null;
+    engine.resetTracking();
     stats.value = engine.lastStats;
   }
 
