@@ -54,6 +54,7 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage>
   Calibration? _calibration;
   VbtEngineController? _controller;
   VisionPoseSource? _visionSource;
+  Future<void>? _cameraOpening;
   late double _weight;
   bool _saving = false;
   bool _starting = false;
@@ -72,6 +73,9 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage>
         widget.exercise.equipment.toLowerCase().contains('barbell')) {
       _weight = 20;
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _cameraOpening = _enableCamera();
+    });
   }
 
   @override
@@ -94,6 +98,8 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage>
   }
 
   Future<void> _openCalibration() async {
+    await _cameraOpening;
+    if (!mounted) return;
     final result = await pushAppPage<Calibration>(
       context,
       CalibrationPage(
@@ -137,6 +143,8 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage>
   }
 
   Future<void> _startSession() async {
+    await _cameraOpening;
+    if (!mounted) return;
     if (_started) {
       _resume();
       return;
@@ -388,6 +396,13 @@ class _LiveHudPageState extends ConsumerState<LiveHudPage>
     _finishing = false;
     setState(() {});
     await _start();
+  }
+
+  Future<void> _enableCamera() async {
+    await _camera.enable();
+    if (mounted && _camera.error != null) {
+      showAppSnack(context, context.t('cameraFailed'), error: true);
+    }
   }
 
   Future<void> _flipCamera() async {

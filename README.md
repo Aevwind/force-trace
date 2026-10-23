@@ -29,8 +29,8 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 动作库 | 内置 1,324 个标准化动作，支持中/英名称、肌群/器械/部位检索，10 种语言的分布教程，三级视觉等级（Tier 1 / 2 / 3） |
-| 动作详情 | `flutter_body_atlas` 交互式 SVG 肌群图谱（正面/背面、主/协同肌高亮、点击查看）、逐语言步骤、器械与目标肌群、加入今日训练 |
+| 动作库 | 内置 1,324 个标准化动作，支持中/英名称、肌群/器械/部位检索，筛选面板支持点击正反面人体模型选择部位、联动高亮与实时结果数，10 种语言的分布教程，三级视觉等级（Tier 1 / 2 / 3） |
+| 动作详情 | 顶部动作图片/GIF 切换预览、`flutter_body_atlas` 交互式 SVG 肌群图谱（正面/背面、主/协同肌高亮、点击查看）、逐语言步骤、器械与目标肌群、加入今日训练 |
 | 今日训练 | 计划组数/次数/重量、完成进度、快速开始、从动作库批量添加 |
 | 实时 HUD | Android/iOS ML Kit 真实姿态推理（Web 模拟回退）、**默认前置摄像头**/可切换后置、全屏相机预览、骨架锚点与连线、髋/膝角度扇形、双色参考点轨迹、跟随速度胶囊、左侧四宫格毛玻璃仪表盘、阶段轨、语音/震动提示 |
 | 空间标定 | 标准 45/35/50 cm 杠铃片自动识别、身高标定、陀螺仪倾角检测、机位引导框 |
@@ -155,7 +155,7 @@ lib/
 assets/db/           initial_exercises.db.gz（预置 SQLite，10 语言，1324 动作）
 tool/                  build_exercises_dataset.py, make_icons.py
 web/                   index.html, manifest, sqlite3.wasm, drift_worker.js
-test/                  41 个单元/组件测试
+test/                  48 个单元/组件测试
 ```
 
 ### 关键算法
@@ -171,7 +171,7 @@ test/                  41 个单元/组件测试
 ## 4. 数据与版权
 
 - 动作数据来自 [`hasaneyldrm/exercises-dataset`](https://github.com/hasaneyldrm/exercises-dataset)，共 1,324 个动作、10 种语言教程。
-- 原仓库已移除 Gym Visual 版权动图；本应用**不打包任何动作图片/视频**，动作媒体版权归 © Gym visual，若后续接入需自行取得授权。
+- 动作预览根据已有 `id` / `media_id` 按需读取上游的 180×180 缩略图和 GIF，默认显示静态图片，点击「动图」后播放，不向安装包打包媒体；无网络时显示重试入口。媒体署名保留在预览下方，使用条款见上游 [媒体说明](https://github.com/hasaneyldrm/exercises-dataset/blob/main/NOTICE.md)。
 - 人体肌群图谱使用 [`flutter_body_atlas`](https://pub.dev/packages/flutter_body_atlas)（BSD-3-Clause）；其 SVG 解剖图层基于 [Ryan Graves 的作品](https://www.figma.com/community/file/1320468164820924031)，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可，并为交互命中测试修改了元素 ID。应用内动作详情页与「设置 → 关于」均保留了署名。
 - 中文动作名由关键词短语表生成，旗舰动作有人工覆盖；其余长尾动作可能出现直译感。
 - 重新生成离线资产：
@@ -188,6 +188,7 @@ python tool/build_exercises_dataset.py --source /path/to/exercises.json
 实时链路已经接入 **Android/iOS 的 ML Kit Pose Landmarker**（`google_mlkit_pose_detection 0.16.1`）：
 
 - 相机请求 **15 FPS**；`camera.startImageStream` → **最多 15 FPS 的推理节流** → NV21/YUV420 转换 → ML Kit 33 个关键点 → `PoseFrame`。多余帧在转换和推理前丢弃，无积压队列；实际采集帧率取决于设备支持；
+- 进入视觉追踪页默认申请并开启前置相机；标定与开始训练会等待初始化完成。用户仍可手动关闭或切换相机；权限拒绝或无相机时保留演示回退；
 - 首次识别选择可见且置信度较高的一侧，并在本次跟踪期间固定左右身份与参考点，避免逐帧切侧或遮挡时从双侧中点跳到单侧。参考点：深蹲/俯卧撑取该侧肩；卧推/推举/硬拉/弯举取该侧手腕；引体取该侧髋；
 - 双侧骨架与参考点均在归一化坐标上做 One-Euro 滤波，避免像素尺度放大导数后使滤波失效；HUD 的 30 Hz 轮询只处理新时间戳，速度按真实采样间隔计算，支持低帧率；
 - 暂停、后台和结束训练时不再调用姿态模型；身高标定最多 **6 FPS**，片径演示标定不运行姿态模型。短暂遮挡保留最近的有效姿态，**500 ms** 后失效，重新识别时重置滤波和未完成动作，避免速度突跳；
@@ -213,7 +214,7 @@ python tool/build_exercises_dataset.py --source /path/to/exercises.json
 
 ```bash
 flutter analyze          # No issues found
-flutter test             # 41 tests passed
+flutter test             # 48 tests passed
 flutter build web --release --no-wasm-dry-run
 ```
 
@@ -228,6 +229,8 @@ flutter build web --release --no-wasm-dry-run
 - 预置 SQLite 与 Drift schema 一致、10 语言教程可读、今日计划幂等生成；
 - 完整组模拟：多次有效动作、最佳次数、VL、自动停组、Tier 2 无杠铃模式；
 - TierBadge 中英文渲染。
+- 动作图片/GIF 切换与加载失败回退、320 px 窄屏按钮不换行、视觉追踪默认打开相机与初始化中退出页面。
+- 人体区域分类、真实 SVG 点击筛选与再次点击取消、前后视图及标签高亮同步、与搜索/器械/视觉等级组合筛选、窄屏重置后搜索框同步清空。
 
 ## 7. 已知限制
 

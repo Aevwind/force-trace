@@ -9,6 +9,7 @@ import '../../core/widgets/common.dart';
 import '../../data/models/models.dart';
 import '../shell/home_shell.dart';
 import 'exercise_detail_page.dart';
+import 'widgets/body_category_filter.dart';
 import 'widgets/exercise_card.dart';
 
 class LibraryPage extends ConsumerStatefulWidget {
@@ -22,6 +23,12 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   final TextEditingController _search = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    _search.text = ref.read(libraryFilterProvider).query;
+  }
+
+  @override
   void dispose() {
     _search.dispose();
     super.dispose();
@@ -29,6 +36,14 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(libraryFilterProvider, (previous, next) {
+      if (_search.text != next.query) {
+        _search.value = TextEditingValue(
+          text: next.query,
+          selection: TextSelection.collapsed(offset: next.query.length),
+        );
+      }
+    });
     final filter = ref.watch(libraryFilterProvider);
     final async = ref.watch(filteredExercisesProvider);
     final all = ref.watch(catalogProvider).valueOrNull ?? const <Exercise>[];
@@ -377,6 +392,10 @@ class _FilterSheet extends ConsumerWidget {
             .toList()
           ..sort();
     final locale = Localizations.localeOf(context).languageCode;
+    final resultCount = ref
+        .watch(filteredExercisesProvider)
+        .valueOrNull
+        ?.length;
 
     return Container(
       constraints: BoxConstraints(
@@ -424,6 +443,16 @@ class _FilterSheet extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  BodyCategoryFilter(
+                    selectedCategory: filter.category,
+                    availableCategories: categories.toSet(),
+                    onChanged: (category) {
+                      ref.read(libraryFilterProvider.notifier).state = ref
+                          .read(libraryFilterProvider)
+                          .copyWith(category: category);
+                    },
+                  ),
+                  const SizedBox(height: 22),
                   Text(
                     context.t('category'),
                     style: Theme.of(context).textTheme.labelMedium,
@@ -480,7 +509,11 @@ class _FilterSheet extends ConsumerWidget {
             width: double.infinity,
             child: FilledButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: Text(context.t('commonDone')),
+              child: Text(
+                resultCount == null
+                    ? context.t('commonDone')
+                    : '${context.t('commonDone')} · $resultCount ${context.t('results')}',
+              ),
             ),
           ),
         ],

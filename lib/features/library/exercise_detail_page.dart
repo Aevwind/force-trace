@@ -7,6 +7,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/widgets/common.dart';
 import '../../data/models/models.dart';
 import '../workout/workout_actions.dart';
+import 'widgets/exercise_preview.dart';
 import 'widgets/muscle_map.dart';
 
 class ExerciseDetailPage extends ConsumerStatefulWidget {
@@ -129,6 +130,11 @@ class _DetailContent extends ConsumerWidget {
             ],
           ),
         ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: ExercisePreview(exercise: exercise),
+        ),
+        const SizedBox(height: 14),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Container(
@@ -504,35 +510,61 @@ class _DetailActions extends ConsumerWidget {
         child: Row(
           children: [
             Expanded(
-              flex: 4,
-              child: OutlinedButton.icon(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
                 onPressed: () => addExerciseToToday(context, ref, exercise),
-                icon: const Icon(Icons.add_rounded, size: 18),
-                label: Text(context.t('addToPlan')),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.add_rounded, size: 18),
+                      const SizedBox(width: 6),
+                      Text(
+                        context.t('addToPlan'),
+                        maxLines: 1,
+                        softWrap: false,
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
-              flex: 6,
-              child: FilledButton.icon(
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
                 onPressed: () => startExercise(
                   context,
                   ref,
                   exercise,
                   targetReps: exercise.tier == ExerciseTier.vbt ? 5 : 8,
                 ),
-                icon: Icon(
-                  exercise.tier == ExerciseTier.volume
-                      ? Icons.edit_note_rounded
-                      : Icons.center_focus_strong_rounded,
-                  size: 18,
-                ),
-                label: Text(
-                  exercise.tier == ExerciseTier.volume
-                      ? context.t('quickLog')
-                      : context.t('startVbt'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        exercise.tier == ExerciseTier.volume
+                            ? Icons.edit_note_rounded
+                            : Icons.center_focus_strong_rounded,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        exercise.tier == ExerciseTier.volume
+                            ? context.t('quickLog')
+                            : context.t('startVbt'),
+                        maxLines: 1,
+                        softWrap: false,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

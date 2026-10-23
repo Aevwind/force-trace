@@ -3,7 +3,6 @@
 Usage:
     python tool/make_icons.py   # requires Pillow
 """
-import math
 import os
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -17,7 +16,7 @@ def lerp(a, b, t):
     return int(a + (b - a) * t)
 
 
-def make_icon(padding_ratio=0.0, maskable=False):
+def make_icon():
     img = Image.new("RGB", (S, S), (7, 11, 15))
     px = img.load()
     for y in range(S):
@@ -40,7 +39,7 @@ def make_icon(padding_ratio=0.0, maskable=False):
     img = Image.alpha_composite(img.convert("RGBA"), glow)
 
     draw = ImageDraw.Draw(img)
-    pad = S * (0.115 + padding_ratio)
+    pad = S * 0.115
     box = [pad, pad, S - pad, S - pad]
     radius = (box[2] - box[0]) * 0.24
 
@@ -92,12 +91,23 @@ def make_icon(padding_ratio=0.0, maskable=False):
             fill=(251, 146, 60, 255),
         )
 
-    # Crop away the transparent edge, then resize.
-    return img.convert("RGB").resize((SIZE, SIZE), Image.LANCZOS)
+    # Remove only the exterior tile. Keep the rounded frame, its interior and
+    # the mark unchanged; retain alpha when exporting launcher PNGs and ICOs.
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius, fill=255)
+    img.putalpha(mask)
+    return img.resize((SIZE, SIZE), Image.LANCZOS)
 
 
 icon = make_icon()
-maskable = make_icon(padding_ratio=0.045, maskable=True)
+
+# The default iOS asset catalog expects opaque icons. Remove the outer margin
+# and let iOS apply its own corner mask, rather than flatten transparent padding
+# back onto a black square.
+inset = round(SIZE * 0.115)
+ios_mark = icon.crop((inset, inset, SIZE - inset, SIZE - inset))
+ios_icon = Image.new("RGBA", ios_mark.size, (74, 222, 128, 255))
+ios_icon = Image.alpha_composite(ios_icon, ios_mark).convert("RGB")
 
 
 def save(img, path, size):
@@ -106,11 +116,9 @@ def save(img, path, size):
     print("wrote", path, size)
 
 
-save(icon, os.path.join(ROOT, r"web\favicon.png"), 64)
-save(icon, os.path.join(ROOT, r"web\icons\Icon-192.png"), 192)
-save(icon, os.path.join(ROOT, r"web\icons\Icon-512.png"), 512)
-save(maskable, os.path.join(ROOT, r"web\icons\Icon-maskable-192.png"), 192)
-save(maskable, os.path.join(ROOT, r"web\icons\Icon-maskable-512.png"), 512)
+save(icon, os.path.join(ROOT, "web", "favicon.png"), 64)
+save(icon, os.path.join(ROOT, "web", "icons", "Icon-192.png"), 192)
+save(icon, os.path.join(ROOT, "web", "icons", "Icon-512.png"), 512)
 
 android_sizes = {
     "mipmap-mdpi": 48,
@@ -145,13 +153,13 @@ ios_files = {
 }
 for name, size in ios_files.items():
     save(
-        icon,
+        ios_icon,
         os.path.join(ROOT, "ios", "Runner", "Assets.xcassets", "AppIcon.appiconset", name),
         size,
     )
 
 # Windows .ico
-ico_path = os.path.join(ROOT, r"windows\runner\resources\app_icon.ico")
+ico_path = os.path.join(ROOT, "windows", "runner", "resources", "app_icon.ico")
 icon.save(
     ico_path,
     format="ICO",

@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 class CameraSession extends ChangeNotifier {
   CameraController? _controller;
   bool _initializing = false;
+  bool _disposed = false;
+  Future<void>? _initialization;
   String? _error;
   CameraLensDirection _preferredLens = CameraLensDirection.front;
 
@@ -39,13 +41,21 @@ class CameraSession extends ChangeNotifier {
     }
   }
 
-  Future<void> enable() async {
-    if (_initializing || active) return;
+  Future<void> enable() {
+    if (_disposed || active) return Future<void>.value();
+    return _initialization ??= _enable().whenComplete(
+      () => _initialization = null,
+    );
+  }
+
+  Future<void> _enable() async {
     _initializing = true;
     _error = null;
     notifyListeners();
+    CameraController? pending;
     try {
       final cameras = await availableCameras();
+      if (_disposed) return;
       if (cameras.isEmpty) {
         throw StateError('No camera available');
       }
@@ -54,7 +64,7 @@ class CameraSession extends ChangeNotifier {
         orElse: () => cameras.first,
       );
       _preferredLens = camera.lensDirection;
-      final controller = CameraController(
+      final controller = pending = CameraController(
         camera,
         ResolutionPreset.medium,
         fps: 15,
@@ -64,20 +74,30 @@ class CameraSession extends ChangeNotifier {
             : ImageFormatGroup.bgra8888,
       );
       await controller.initialize();
+      if (_disposed) return;
       _controller = controller;
+      pending = null;
     } catch (error) {
-      _error = '$error';
-      _controller = null;
+      if (!_disposed) {
+        _error = '$error';
+        _controller = null;
+      }
     } finally {
+      try {
+        await pending?.dispose();
+      } catch (_) {
+        // Release a failed or abandoned initialization without masking errors.
+      }
       _initializing = false;
-      notifyListeners();
+      if (!_disposed) notifyListeners();
     }
   }
 
   Future<void> disable() async {
+    await _initialization;
     final controller = _controller;
     _controller = null;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     try {
       await controller?.stopImageStream();
     } catch (_) {
@@ -92,6 +112,7 @@ class CameraSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _controller?.dispose();
     _controller = null;
     super.dispose();
